@@ -2626,11 +2626,11 @@ static int kill_one_process(struct proc* procp, int min_oom_score, int kill_reas
     killinfo_log(procp, min_oom_score, tasksize, kill_reason, mi);
 
     if (kill_desc) {
-        ULMK_LOG(I, "Kill '%s' (%d), uid %d, oom_adj %d to free %ldkB; reason: %s", taskname, pid,
-              uid, procp->oomadj, tasksize * page_k, kill_desc);
+        ULMK_LOG(I, "Kill '%s' (%d), uid %d, oom_adj %d at min_oom_score %d to free %ldkB; reason: %s", taskname, pid,
+              uid, procp->oomadj, min_oom_score, tasksize * page_k, kill_desc);
     } else {
-        ULMK_LOG(I, "Kill '%s' (%d), uid %d, oom_adj %d to free %ldkB", taskname, pid,
-              uid, procp->oomadj, tasksize * page_k);
+        ULMK_LOG(I, "Kill '%s' (%d), uid %d, oom_adj %d at min_oom_score %d to free %ldkB", taskname, pid,
+              uid, procp->oomadj, min_oom_score, tasksize * page_k);
     }
 
     stats_write_lmk_kill_occurred(uid, taskname, procp->oomadj, min_oom_score, tasksize, mem_st);
@@ -3539,7 +3539,7 @@ do_kill:
                 min_score_adj = zone_watermarks_ok(level);
                 if (min_score_adj == OOM_SCORE_ADJ_MAX + 1)
                 {
-                    ULMK_LOG(I, "Ignoring pressure since per-zone watermarks ok");
+                    //ULMK_LOG(I, "Ignoring pressure since per-zone watermarks ok");
                     return;
                 }
             }
@@ -3564,8 +3564,8 @@ do_kill:
                 zi.totalreserve_pages * page_k,
                 minfree * page_k, min_score_adj);
         } else {
-            ALOGI("Reclaimed %ldkB at oom_adj %d",
-                pages_freed * page_k, min_score_adj);
+            //ALOGI("Reclaimed %ldkB at oom_adj %d",
+            //    pages_freed * page_k, min_score_adj);
         }
 
         if (report_skip_count > 0) {
