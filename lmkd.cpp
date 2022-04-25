@@ -894,18 +894,8 @@ static void poll_kernel(int poll_fd) {
             ctrl_data_write_lmk_kill_occurred((pid_t)pid, (uid_t)uid);
             mem_st.process_start_time_ns = starttime * (NS_PER_SEC / sysconf(_SC_CLK_TCK));
             mem_st.rss_in_bytes = rss_in_pages * PAGE_SIZE;
-
-            struct kill_stat kill_st = {
-                .uid = static_cast<int32_t>(uid),
-                .kill_reason = NONE,
-                .oom_score = oom_score_adj,
-                .min_oom_score = min_score_adj,
-                .free_mem_kb = 0,
-                .free_swap_kb = 0,
-                .tasksize = 0,
-
-            };
-            stats_write_lmk_kill_occurred_pid(pid, &kill_st, &mem_st);
+            stats_write_lmk_kill_occurred_pid(uid, pid, oom_score_adj,
+                                              min_score_adj, 0, &mem_st);
         }
 
         free(taskname);
@@ -2579,7 +2569,7 @@ static void start_wait_for_proc_kill(int pid_or_fd) {
 }
 
 /* Kill one process specified by procp.  Returns the size of the process killed */
-static int kill_one_process(struct proc* procp, int min_oom_score, enum kill_reasons kill_reason,
+static int kill_one_process(struct proc* procp, int min_oom_score, int kill_reason,
                             const char *kill_desc, union meminfo *mi, struct timespec *tm) {
     int pid = procp->pid;
     int pidfd = procp->pidfd;
@@ -2591,7 +2581,6 @@ static int kill_one_process(struct proc* procp, int min_oom_score, enum kill_rea
     int result = -1;
     struct memory_stat *mem_st;
     char buf[LINE_MAX];
-    struct kill_stat kill_st;
 
     tgid = proc_get_tgid(pid);
     if (tgid >= 0 && tgid != pid) {
@@ -2640,22 +2629,14 @@ static int kill_one_process(struct proc* procp, int min_oom_score, enum kill_rea
     killinfo_log(procp, min_oom_score, tasksize, kill_reason, mi);
 
     if (kill_desc) {
-        ULMK_LOG(I, "Kill '%s' (%d), uid %d, oom_adj %d to free %ldkB; reason: %s", taskname, pid,
-              uid, procp->oomadj, tasksize * page_k, kill_desc);
+        ULMK_LOG(I, "Kill '%s' (%d), uid %d, oom_adj %d at min_oom_score %d to free %ldkB; reason: %s", taskname, pid,
+              uid, procp->oomadj, min_oom_score, tasksize * page_k, kill_desc);
     } else {
-        ULMK_LOG(I, "Kill '%s' (%d), uid %d, oom_adj %d to free %ldkB", taskname, pid,
-              uid, procp->oomadj, tasksize * page_k);
+        ULMK_LOG(I, "Kill '%s' (%d), uid %d, oom_adj %d at min_oom_score %d to free %ldkB", taskname, pid,
+              uid, procp->oomadj, min_oom_score, tasksize * page_k);
     }
 
-    kill_st.uid = static_cast<int32_t>(uid);
-    kill_st.taskname = taskname;
-    kill_st.kill_reason = kill_reason;
-    kill_st.oom_score = procp->oomadj;
-    kill_st.min_oom_score = min_oom_score;
-    kill_st.free_mem_kb = mi->field.nr_free_pages * page_k;
-    kill_st.free_swap_kb = mi->field.free_swap * page_k;
-    kill_st.tasksize = tasksize;
-    stats_write_lmk_kill_occurred(&kill_st, mem_st);
+    stats_write_lmk_kill_occurred(uid, taskname, procp->oomadj, min_oom_score, tasksize, mem_st);
 
     ctrl_data_write_lmk_kill_occurred((pid_t)pid, uid);
 
@@ -2674,8 +2655,7 @@ out:
  * Find one process to kill at or above the given oom_adj level.
  * Returns size of the killed process.
  */
-static int find_and_kill_process(int min_score_adj, enum kill_reasons kill_reason,
-                                 const char *kill_desc,
+static int find_and_kill_process(int min_score_adj, int kill_reason, const char *kill_desc,
                                  union meminfo *mi, struct timespec *tm) {
     int i;
     int killed_size = 0;
@@ -2937,6 +2917,19 @@ static void fill_log_pgskip_stats(union vmstat *vs, int64_t *init_pgskip, int64_
 }
 
 static void mp_event_psi(int data, uint32_t events, struct polling_params *poll_params) {
+    enum kill_reasons {
+        NONE = -1, /* To denote no kill condition */
+        PRESSURE_AFTER_KILL = 0,
+        CRITICAL_KILL,
+        LOW_SWAP_AND_THRASHING,
+        LOW_MEM_AND_SWAP,
+        LOW_MEM_AND_THRASHING,
+        DIRECT_RECL_AND_THRASHING,
+        DIRECT_RECL_AND_THROT,
+        DIRECT_RECL_AND_LOW_MEM,
+        COMPACTION,
+        KILL_REASON_COUNT
+    };
     enum reclaim_state {
         NO_RECLAIM = 0,
         KSWAPD_RECLAIM,
@@ -3535,7 +3528,7 @@ static void mp_event_common(int data, uint32_t events, struct polling_params *po
 do_kill:
     if (low_ram_device && per_app_memcg) {
         /* For Go devices kill only one task */
-        if (find_and_kill_process(level_oomadj[level], NONE, NULL, &mi, &curr_tm) == 0) {
+        if (find_and_kill_process(level_oomadj[level], -1, NULL, &mi, &curr_tm) == 0) {
             if (debug_process_killing) {
                 ALOGI("Nothing to kill");
             }
@@ -3561,13 +3554,13 @@ do_kill:
                 min_score_adj = zone_watermarks_ok(level);
                 if (min_score_adj == OOM_SCORE_ADJ_MAX + 1)
                 {
-                    ULMK_LOG(I, "Ignoring pressure since per-zone watermarks ok");
+                    //ULMK_LOG(I, "Ignoring pressure since per-zone watermarks ok");
                     return;
                 }
             }
         }
 
-        pages_freed = find_and_kill_process(min_score_adj, NONE, NULL, &mi, &curr_tm);
+        pages_freed = find_and_kill_process(min_score_adj, -1, NULL, &mi, &curr_tm);
 
         if (pages_freed == 0) {
             /* Rate limit kill reports when nothing was reclaimed */
@@ -3586,8 +3579,8 @@ do_kill:
                 zi.totalreserve_pages * page_k,
                 minfree * page_k, min_score_adj);
         } else {
-            ALOGI("Reclaimed %ldkB at oom_adj %d",
-                pages_freed * page_k, min_score_adj);
+            //ALOGI("Reclaimed %ldkB at oom_adj %d",
+            //    pages_freed * page_k, min_score_adj);
         }
 
         if (report_skip_count > 0) {
