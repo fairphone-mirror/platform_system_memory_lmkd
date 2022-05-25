@@ -4107,7 +4107,7 @@ do_kill:
             } else {
                 min_score_adj = zone_watermarks_ok(level);
                 if (min_score_adj == OOM_SCORE_ADJ_MAX + 1) {
-                    ULMK_LOG(I, "Ignoring pressure since per-zone watermarks ok");
+                    //ULMK_LOG(I, "Ignoring pressure since per-zone watermarks ok");
                     return;
                 }
             }
@@ -4132,7 +4132,7 @@ do_kill:
                 zi.totalreserve_pages * page_k,
                 minfree * page_k, min_score_adj);
         } else {
-            ALOGI("Reclaimed %ldkB at oom_score_adj %d", pages_freed * page_k, min_score_adj);
+            //ALOGI("Reclaimed %ldkB at oom_score_adj %d", pages_freed * page_k, min_score_adj);
         }
 
         if (report_skip_count > 0) {
