@@ -172,9 +172,9 @@ static inline void trace_kill_end() {}
 #define DEF_PARTIAL_STALL_LOWRAM 200
 #define DEF_PARTIAL_STALL 70
 /* ro.lmk.psi_complete_stall_ms property defaults */
-#define DEF_COMPLETE_STALL 700
+#define DEF_COMPLETE_STALL 70
 /* ro.lmk.psi_scrit_complete_stall_ms property defaults */
-#define DEF_COMPLETE_STALL_SCRIT 800
+#define DEF_COMPLETE_STALL_SCRIT 250
 /* ro.lmk.direct_reclaim_threshold_ms property defaults */
 #define DEF_DIRECT_RECL_THRESH_MS 0
 /* ro.lmk.swap_compression_ratio property defaults */
@@ -2220,7 +2220,7 @@ static int meminfo_parse(union meminfo *mi) {
 // Swap compression ratio in the calculation can be adjusted using swap_compression_ratio tunable.
 // By setting swap_compression_ratio to 0, available memory can be ignored.
 static inline int64_t get_free_swap(union meminfo *mi) {
-    if (swap_compression_ratio)
+    if (false && swap_compression_ratio)
         return std::min(mi->field.free_swap, mi->field.easy_available * swap_compression_ratio);
     return mi->field.free_swap;
 }
@@ -3342,8 +3342,8 @@ void calc_zone_watermarks(struct zoneinfo *zi, struct zone_meminfo *zmi, int64_t
 
         // Kernel watermarks are per zone. But LMK operates on a single watermark. So, consider only the worst case of zone watermark.
         watermarks->high_wmark = max_high + max_protection;
-        watermarks->low_wmark = max_low + max_protection;
         watermarks->min_wmark = max_min + max_protection;
+        watermarks->low_wmark = ((watermarks->high_wmark + watermarks->min_wmark) / 2) + max_protection;
     }
 
     if (debug_process_killing)
@@ -3770,7 +3770,7 @@ update_watermarks:
      * TODO: move this logic into a separate function
      * Decide if killing a process is necessary and record the reason
      */
-    if (source == VENDOR) {
+    if (source == VENDOR && swap_is_low) {
         int vendor_kill_reason = data.vendor_event.event_data.vendor_kill.reason;
         short vendor_kill_min_oom_score_adj =
             data.vendor_event.event_data.vendor_kill.min_oom_score_adj;
@@ -3786,7 +3786,7 @@ update_watermarks:
         min_score_adj = vendor_kill_min_oom_score_adj;
         snprintf(kill_desc, sizeof(kill_desc),
             "vendor kill with the reason %d, min_score_adj %d", kill_reason, min_score_adj);
-    } else if (cycle_after_kill && wmark <= WMARK_LOW) {
+    } else if (cycle_after_kill && wmark <= WMARK_MIN && swap_is_low) {
         /*
          * Prevent kills not freeing enough memory which might lead to OOM kill.
          * This might happen when a process is consuming memory faster than reclaim can
@@ -3799,11 +3799,11 @@ update_watermarks:
         if (wmark > WMARK_MIN) {
             min_score_adj = VISIBLE_APP_ADJ;
         }
-    } else if (reclaim == DIRECT_RECLAIM_THROTTLE) {
+    } else if (reclaim == DIRECT_RECLAIM_THROTTLE && swap_is_low) {
         kill_reason = DIRECT_RECL_AND_THROT;
         strlcpy(kill_desc, "system processes are being throttled", sizeof(kill_desc));
         kill_desc[sizeof(kill_desc) - 1] = '\0';
-    } else if (level == VMPRESS_LEVEL_CRITICAL && wmark <= WMARK_HIGH) {
+    } else if (level == VMPRESS_LEVEL_CRITICAL && wmark <= WMARK_LOW && swap_is_low) {
         /*
          * Device is too busy reclaiming memory which might lead to ANR.
          * Critical level is triggered when PSI complete stall (all tasks are blocked because
@@ -3812,7 +3812,7 @@ update_watermarks:
         kill_reason = CRITICAL_KILL;
         strlcpy(kill_desc, "critical pressure and device is low on memory", sizeof(kill_desc));
         min_score_adj = PERCEPTIBLE_RECENT_FOREGROUND_APP_ADJ;
-    } else if (level == VMPRESS_LEVEL_SUPER_CRITICAL && wmark <= WMARK_HIGH) {
+    } else if (level == VMPRESS_LEVEL_SUPER_CRITICAL && wmark <= WMARK_LOW && swap_is_low) {
         /*
          * Device is too busy reclaiming memory which might lead to ANR.
          * Critical level is triggered when PSI complete stall (all tasks are blocked because
@@ -3839,7 +3839,7 @@ update_watermarks:
             min_score_adj = PERCEPTIBLE_APP_ADJ + 1;
         }
         check_filecache = true;
-    } else if (swap_is_low && wmark <= WMARK_HIGH) {
+    } else if (swap_is_low && wmark <= WMARK_LOW) {
         /* Both free memory and swap are low */
         kill_reason = LOW_MEM_AND_SWAP;
         snprintf(kill_desc, sizeof(kill_desc), "%s watermark is breached and swap is low (%"
@@ -3859,7 +3859,7 @@ update_watermarks:
         snprintf(kill_desc, sizeof(kill_desc), "%s watermark is breached and swap utilization"
             " is high (%d%% > %d%%)", wmark < WMARK_LOW ? "min" : "low",
             swap_util, swap_util_max);
-    } else if (wmark <= WMARK_HIGH && thrashing > thrashing_limit) {
+    } else if (wmark <= WMARK_LOW && thrashing > thrashing_limit  && swap_is_low) {
         /* Page cache is thrashing while memory is low */
         kill_reason = LOW_MEM_AND_THRASHING;
         snprintf(kill_desc, sizeof(kill_desc), "%s watermark is breached and thrashing (%"
@@ -3868,7 +3868,7 @@ update_watermarks:
         min_score_adj = VISIBLE_APP_ADJ;
 
         check_filecache = true;
-    } else if (reclaim == DIRECT_RECLAIM && thrashing > thrashing_limit) {
+    } else if (reclaim == DIRECT_RECLAIM && thrashing > thrashing_limit && swap_is_low) {
         /* Page cache is thrashing while in direct reclaim (mostly happens on lowram devices) */
         kill_reason = DIRECT_RECL_AND_THRASHING;
         snprintf(kill_desc, sizeof(kill_desc), "device is in direct reclaim and thrashing (%"
@@ -3897,18 +3897,18 @@ update_watermarks:
             /* File cache is big enough, stop checking */
             check_filecache = false;
         }
-    } else if (reclaim == DIRECT_RECLAIM && wmark <= WMARK_HIGH) {
+    } else if (reclaim == DIRECT_RECLAIM && wmark <= WMARK_MIN && swap_is_low ) {
         kill_reason = DIRECT_RECL_AND_LOW_MEM;
         strlcpy(kill_desc, "device is in direct reclaim and low on memory", sizeof(kill_desc));
         min_score_adj = PERCEPTIBLE_APP_ADJ;
-    } else if (in_compaction && wmark <= WMARK_HIGH) {
+    } else if (in_compaction && wmark <= WMARK_MIN && swap_is_low) {
         kill_reason = COMPACTION;
         strlcpy(kill_desc, "device is in compaction and low on memory", sizeof(kill_desc));
         min_score_adj = VISIBLE_APP_ADJ;
     }
 
     /* Check if a cached app should be killed */
-    if (kill_reason == NONE && wmark < WMARK_HIGH) {
+    if (kill_reason == NONE && wmark <= WMARK_MIN) {
         kill_reason = LOW_MEM;
         snprintf(kill_desc, sizeof(kill_desc), "%s watermark is breached",
             wmark < WMARK_LOW ? "min" : "low");
@@ -5025,9 +5025,9 @@ static bool update_props() {
 
     /* By default disable upgrade/downgrade logic */
     upgrade_pressure =
-        (int64_t)GET_LMK_PROPERTY(int32, "upgrade_pressure", 100);
+        (int64_t)GET_LMK_PROPERTY(int32, "upgrade_pressure", 60);
     downgrade_pressure =
-        (int64_t)GET_LMK_PROPERTY(int32, "downgrade_pressure", 100);
+        (int64_t)GET_LMK_PROPERTY(int32, "downgrade_pressure", 25);
     kill_heaviest_task =
         GET_LMK_PROPERTY(bool, "kill_heaviest_task", false);
     low_ram_device = property_get_bool("ro.config.low_ram", false);
